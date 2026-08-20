@@ -1,0 +1,12 @@
+{
+  "name": "Erling Open",
+  "short_name": "Erling Open",
+  "description": "Huskeliste, score og spill for utdrikningslaget",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101418",
+  "theme_color": "#101418",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "schedule": [
+    { "time": "09:30", "title": "Frokost hos Gunnar", "where": "Frognerveien 30E", "icon": "🥖" },
+    { "time": "11:00", "title": "Simulatorgolf på PINPIN", "where": "Hegdehaugsveien", "icon": "⛳️" },
+    { "time": "13:30", "title": "Lunsj på Osteria de Campo", "where": "Frogner", "icon": "🍕" },
+    { "time": "16:00", "title": "Vinkurs med Svein Lindin", "where": "Frognerveien 30E", "icon": "🍷" },
+    { "time": "19:00", "title": "Matbit", "where": "TBD", "icon": "🍽️" },
+    { "time": "21:00", "title": "Bord på The Broker", "where": "Bogstadveien", "icon": "🍻" }
+  ],
+  "scorePresets": [
+    { "activity": "golf", "label": "Closest to pin 🎯", "points": 5 },
+    { "activity": "golf", "label": "Longest drive 🚀", "points": 5 },
+    { "activity": "golf", "label": "Hole-in-one 🏆", "points": 20 },
+    { "activity": "golf", "label": "Katastrofeslag 💥", "points": 3 },
+    { "activity": "golf", "label": "Lagseier PINPIN 🥇", "points": 15 },
+    { "activity": "dagen", "label": "Dagens første shot 🥃", "points": 2 },
+    { "activity": "dagen", "label": "Stilpoeng 😎", "points": 3 },
+    { "activity": "dagen", "label": "Straffepoeng 🙈", "points": -3 }
+  ],
+  "quizzes": [
+    {
+      "name": "Erling-quiz 🧠",
+      "questions": [
+        { "text": "Hvilket år ble Erling født?", "type": "number", "answer": "", "points": 5 },
+        { "text": "Hva hadde Erling valgt: vinkjeller eller golfsimulator i kjelleren?", "type": "choice", "options": ["Vinkjeller", "Golfsimulator"], "answer": "", "points": 5 },
+        { "text": "Hva er Erlings favorittdrue?", "type": "choice", "options": ["Pinot Noir", "Riesling", "Nebbiolo", "Chardonnay"], "answer": "", "points": 5 },
+        { "text": "Fortell: Hva var Erlings mest legendariske øyeblikk? (Beste historie vinner)", "type": "text", "answer": "", "points": 10 }
+      ]
+    },
+    {
+      "name": "Tech-quiz 🤖",
+      "questions": [
+        { "text": "Hvilket år kom den første iPhone?", "type": "number", "answer": "2007", "points": 5 },
+        { "text": "Hva sto WAP for på 2000-tallet?", "type": "choice", "options": ["Wireless Application Protocol", "Web Access Point", "Wide Area Phone", "Wireless Apple Product"], "answer": "Wireless Application Protocol", "points": 5 },
+        { "text": "Hvilket år ble Netscape Navigator lansert?", "type": "number", "answer": "1994", "points": 5 }
+      ]
+    },
+    {
+      "name": "Blindsmaking 🍷 (Erling Open)",
+      "questions": [
+        { "text": "Vin 1: Hvilket land?", "type": "choice", "options": ["Frankrike", "Italia", "Spania", "Tyskland", "USA", "Australia"], "answer": "", "points": 5 },
+        { "text": "Vin 1: Pris i kroner?", "type": "number", "answer": "", "points": 5 },
+        { "text": "Vin 2: Hvilket land?", "type": "choice", "options": ["Frankrike", "Italia", "Spania", "Tyskland", "USA", "Australia"], "answer": "", "points": 5 },
+        { "text": "Vin 2: Pris i kroner?", "type": "number", "answer": "", "points": 5 },
+        { "text": "Hvilken vin var dyrest?", "type": "choice", "options": ["Vin 1", "Vin 2", "Vin 3"], "answer": "", "points": 5 }
+      ]
+    }
+  ],
+  "predictions": [
+    { "text": "Når tar Erling dagens første shot?", "type": "time", "points": 10 },
+    { "text": "Hva blir Erlings golfscore på PINPIN?", "type": "number", "points": 10 },
+    { "text": "Hvilken vin liker Erling best på vinkurset?", "type": "choice", "options": ["Vin 1", "Vin 2", "Vin 3"], "points": 10 },
+    { "text": "Når kommer første «nå må vi videre» fra Erling?", "type": "time", "points": 10 },
+    { "text": "Hvor mange ganger nevner Erling jobb før lunsj?", "type": "number", "points": 10 }
+  ],
+  "missions": [
+    { "text": "Bilde med en fremmed i golfantrekk", "points": 10 },
+    { "text": "Erling med noe som koster mer enn 10 000 kr", "points": 10 },
+    { "text": "Finn og dokumenter gammel teknologi", "points": 10 },
+    { "text": "Gjenskap et kjent albumcover", "points": 15 },
+    { "text": "Selfie med noen som heter det samme som en i laget", "points": 15 },
+    { "text": "Hele laget i samme bilde med The Broker-skiltet", "points": 10 }
+  ],
+  "checklist": [
+    { "text": "Kjøpe bobler til frokosten", "adminOnly": false },
+    { "text": "Bekrefte PINPIN-booking", "adminOnly": false },
+    { "text": "Fasit fra kona til Erling-quizen", "adminOnly": true },
+    { "text": "Avtale viner med Svein Lindin", "adminOnly": true },
+    { "text": "Bestemme matbit kl. 19", "adminOnly": false },
+    { "text": "Printe/laste inn spørsmål i appen", "adminOnly": true }
+  ]
+}
