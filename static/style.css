@@ -96,6 +96,9 @@ label { display: block; font-size: .8rem; color: var(--dim); margin: 8px 0 4px; 
 .reveal-state.hidden { color: var(--dim); }
 .reveal-state.shown { color: var(--accent); }
 
+.notice { background: #2a2113; border: 1px solid #6b5320; color: #f5deb0;
+  border-radius: 8px; padding: 8px 10px; font-size: .85rem; margin: 8px 0; }
+
 /* Feed */
 .feed-item { display: flex; gap: 8px; padding: 8px 2px; border-bottom: 1px solid #232b34; font-size: .9rem; align-items: baseline; }
 .feed-item:last-child { border-bottom: 0; }

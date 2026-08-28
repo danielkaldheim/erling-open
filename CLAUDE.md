@@ -78,6 +78,10 @@ to `main`; apply `k8s/erling-open.yaml` (namespace `crudus-apps`, host
   in `db.go` accepts both so an unquoted year does not stop the boot.
 - Numeric answers accept `HH:MM` (parsed as minutes) and comma decimals
   (`parseNumeric` in `api.go`).
+- Embedded static files have no modification time, so `noStaleAssets` in
+  `main.go` adds `Cache-Control: no-cache` plus an ETag hashed from the
+  embedded frontend. Without it a phone can keep running the app.js it
+  cached before a mid-party deploy.
 - The k8s Deployment uses `strategy: Recreate` on purpose (SQLite on a
   RWO volume — no rolling overlap). Keep replicas at 1.
 - The repo is public: `seed.json` contains the day's quiz questions and

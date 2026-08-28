@@ -144,7 +144,12 @@ const app = createApp({
         });
       } catch (err) {
         // The name belongs to an organizer: ask for the organizer code too.
-        if (err.message.includes('arrangørkode')) this.needsAdminCode = true;
+        // The field goes right where the cursor should be, since the toast
+        // that explains it disappears after a few seconds.
+        if (err.message.includes('arrangørkode')) {
+          this.needsAdminCode = true;
+          this.$nextTick(() => this.$refs.regAdminCode?.focus());
+        }
         return;
       }
       this.needsAdminCode = false;
@@ -601,8 +606,11 @@ const app = createApp({
       <p class="muted small">Har du vært med før? Bruk samme navn og samme lagmerke,
         så finner vi deg igjen med poengene dine.</p>
       <template v-if="needsAdminCode">
+        <p class="notice">👑 «{{ regName }}» er arrangør. La festkoden stå, og skriv
+          arrangørkoden i feltet under.</p>
         <label>Arrangørkode</label>
-        <input v-model="regAdminCode" placeholder="Navnet tilhører en arrangør" autocomplete="off">
+        <input ref="regAdminCode" v-model="regAdminCode" placeholder="Arrangørkode"
+               autocomplete="off" @keyup.enter="register">
       </template>
       <br><br>
       <button class="primary block" :disabled="!regName" @click="register">Bli med 🎉</button>

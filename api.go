@@ -129,8 +129,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// Taking over an organizer costs more than knowing their name: the
 		// party code is shared with everyone, the admin code is not.
 		if existingIsAdmin {
-			if s.adminCode == "" || !strings.EqualFold(strings.TrimSpace(body.AdminCode), s.adminCode) {
+			given := strings.TrimSpace(body.AdminCode)
+			if given == "" {
 				httpError(w, http.StatusForbidden, "arrangørkode kreves for denne spilleren")
+				return
+			}
+			if s.adminCode == "" || !strings.EqualFold(given, s.adminCode) {
+				httpError(w, http.StatusForbidden, "feil arrangørkode")
 				return
 			}
 		}
