@@ -43,6 +43,10 @@ PARTY_CODE=fest ADMIN_CODE=hemmelig go run .
 Data lands in `./data/erling.db`, and uploaded quiz media in
 `./data/uploads/` (override both with `DATA_DIR`).
 
+The server stamps every asset reference with a hash of the frontend at boot
+(`app.js?v=…`), so a redeploy invalidates phone caches by itself — there is no
+version number to bump.
+
 ## Organizer workflow
 
 Unlock **Arrangør** under **Mer**. From there you can edit the time,

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"crypto/sha256"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"io/fs"
 	"log"
@@ -17,37 +15,6 @@ var staticFS embed.FS
 
 //go:embed seed.json
 var seedJSON []byte
-
-// noStaleAssets makes phones revalidate the embedded frontend. Embedded files
-// carry no modification time, so without an ETag a browser is free to keep
-// serving yesterday's app.js after a mid-party deploy. buildTag changes with
-// every binary, which is exactly the granularity we need.
-func noStaleAssets(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("ETag", buildTag)
-		next.ServeHTTP(w, r)
-	})
-}
-
-// buildTag is derived from the embedded frontend, so it only changes when the
-// files actually change.
-var buildTag = func() string {
-	sum := sha256.New()
-	fs.WalkDir(staticFS, "static", func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return err
-		}
-		data, err := staticFS.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		sum.Write([]byte(path))
-		sum.Write(data)
-		return nil
-	})
-	return `"` + hex.EncodeToString(sum.Sum(nil)[:8]) + `"`
-}()
 
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -123,7 +90,11 @@ func main() {
 
 	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadDir))))
 	static, _ := fs.Sub(staticFS, "static")
-	mux.Handle("GET /", noStaleAssets(http.FileServerFS(static)))
+	assets, err := newAssetServer(static)
+	if err != nil {
+		log.Fatalf("static: %v", err)
+	}
+	mux.Handle("GET /", assets)
 
 	addr := ":" + env("PORT", "8080")
 	log.Printf("Erling Open listening on %s", addr)

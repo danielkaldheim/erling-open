@@ -78,10 +78,12 @@ to `main`; apply `k8s/erling-open.yaml` (namespace `crudus-apps`, host
   in `db.go` accepts both so an unquoted year does not stop the boot.
 - Numeric answers accept `HH:MM` (parsed as minutes) and comma decimals
   (`parseNumeric` in `api.go`).
-- Embedded static files have no modification time, so `noStaleAssets` in
-  `main.go` adds `Cache-Control: no-cache` plus an ETag hashed from the
-  embedded frontend. Without it a phone can keep running the app.js it
-  cached before a mid-party deploy.
+- Cache busting is automatic: `assets.go` hashes the embedded frontend at
+  boot and rewrites every reference in `index.html`/`app.js` to
+  `name?v=<hash>` (stamped URLs get a one-year immutable cache, `index.html`
+  gets `no-cache`). Don't hand-maintain `?version=` in the HTML — the
+  rewriter replaces any query string that's already there. Only `index.html`
+  and `app.js` are rewritten; the vendored Vue bundle is left alone.
 - The k8s Deployment uses `strategy: Recreate` on purpose (SQLite on a
   RWO volume — no rolling overlap). Keep replicas at 1.
 - The repo is public: `seed.json` contains the day's quiz questions and
