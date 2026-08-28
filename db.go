@@ -40,21 +40,37 @@ CREATE TABLE IF NOT EXISTS score_events (
 	ref        TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS schedule_items (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	sort       INTEGER NOT NULL DEFAULT 0,
+	time       TEXT NOT NULL,
+	title      TEXT NOT NULL,
+	place      TEXT NOT NULL DEFAULT '',
+	icon       TEXT NOT NULL DEFAULT '📍',
+	revealed   INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS quizzes (
-	id   INTEGER PRIMARY KEY AUTOINCREMENT,
-	name TEXT NOT NULL,
-	sort INTEGER NOT NULL DEFAULT 0
+	id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+	name                TEXT NOT NULL,
+	sort                INTEGER NOT NULL DEFAULT 0,
+	state               TEXT NOT NULL DEFAULT 'idle', -- idle | active | finished
+	duration_seconds    INTEGER NOT NULL DEFAULT 0,
+	started_at          INTEGER NOT NULL DEFAULT 0,
+	ends_at              INTEGER NOT NULL DEFAULT 0,
+	current_question_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS questions (
-	id      INTEGER PRIMARY KEY AUTOINCREMENT,
-	quiz_id INTEGER NOT NULL,
-	sort    INTEGER NOT NULL DEFAULT 0,
-	text    TEXT NOT NULL,
-	qtype   TEXT NOT NULL DEFAULT 'choice', -- choice | number | text
-	options TEXT NOT NULL DEFAULT '[]',
-	answer  TEXT NOT NULL DEFAULT '',
-	points  INTEGER NOT NULL DEFAULT 5,
-	state   TEXT NOT NULL DEFAULT 'hidden'  -- hidden | open | revealed
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	quiz_id    INTEGER NOT NULL,
+	sort       INTEGER NOT NULL DEFAULT 0,
+	text       TEXT NOT NULL,
+	qtype      TEXT NOT NULL DEFAULT 'choice', -- choice | number | text
+	options    TEXT NOT NULL DEFAULT '[]',
+	answer     TEXT NOT NULL DEFAULT '',
+	points     INTEGER NOT NULL DEFAULT 5,
+	state      TEXT NOT NULL DEFAULT 'hidden', -- hidden | open | revealed
+	media_url  TEXT NOT NULL DEFAULT '',
+	media_type TEXT NOT NULL DEFAULT ''         -- image | video
 );
 CREATE TABLE IF NOT EXISTS answers (
 	id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,8 +117,34 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `
 
-// Seed mirrors seed.json: the day's content. Schedule and score presets
-// are served straight from the file; the rest is inserted once.
+// seedText is a JSON string that also accepts a bare number, so an answer key
+// or option typed as 1987 instead of "1987" does not stop the server booting.
+type seedText string
+
+func (t *seedText) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*t = seedText(text)
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err != nil {
+		return fmt.Errorf("forventet tekst eller tall, fikk %s", data)
+	}
+	*t = seedText(number.String())
+	return nil
+}
+
+func seedTexts(values []seedText) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = string(v)
+	}
+	return out
+}
+
+// Seed mirrors seed.json: the day's content. Score presets are served
+// straight from the file; editable content is copied into SQLite.
 type Seed struct {
 	Schedule []struct {
 		Time  string `json:"time"`
@@ -118,18 +160,20 @@ type Seed struct {
 	Quizzes []struct {
 		Name      string `json:"name"`
 		Questions []struct {
-			Text    string   `json:"text"`
-			Type    string   `json:"type"`
-			Options []string `json:"options"`
-			Answer  string   `json:"answer"`
-			Points  int      `json:"points"`
+			Text      string     `json:"text"`
+			Type      string     `json:"type"`
+			Options   []seedText `json:"options"`
+			Answer    seedText   `json:"answer"`
+			Points    int        `json:"points"`
+			MediaURL  string     `json:"mediaUrl"`
+			MediaType string     `json:"mediaType"`
 		} `json:"questions"`
 	} `json:"quizzes"`
 	Predictions []struct {
-		Text    string   `json:"text"`
-		Type    string   `json:"type"`
-		Options []string `json:"options"`
-		Points  int      `json:"points"`
+		Text    string     `json:"text"`
+		Type    string     `json:"type"`
+		Options []seedText `json:"options"`
+		Points  int        `json:"points"`
 	} `json:"predictions"`
 	Missions []struct {
 		Text   string `json:"text"`
@@ -153,10 +197,91 @@ func openDB(path string, seed *Seed) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
+	if err := migrateDB(db); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	if err := seedOnce(db, seed); err != nil {
 		return nil, fmt.Errorf("seed: %w", err)
 	}
+	if err := seedScheduleIfEmpty(db, seed); err != nil {
+		return nil, fmt.Errorf("schedule seed: %w", err)
+	}
 	return db, nil
+}
+
+// migrateDB keeps databases created by earlier app versions usable. SQLite's
+// CREATE TABLE IF NOT EXISTS does not add newly introduced columns.
+func migrateDB(db *sql.DB) error {
+	columns := []struct {
+		table, name, definition string
+	}{
+		{"quizzes", "state", "TEXT NOT NULL DEFAULT 'idle'"},
+		{"quizzes", "duration_seconds", "INTEGER NOT NULL DEFAULT 0"},
+		{"quizzes", "started_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"quizzes", "ends_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"quizzes", "current_question_id", "INTEGER"},
+		{"questions", "media_url", "TEXT NOT NULL DEFAULT ''"},
+		{"questions", "media_type", "TEXT NOT NULL DEFAULT ''"},
+		{"schedule_items", "revealed", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, column := range columns {
+		hasColumn, err := tableHasColumn(db, column.table, column.name)
+		if err != nil {
+			return err
+		}
+		if !hasColumn {
+			if _, err := db.Exec("ALTER TABLE " + column.table + " ADD COLUMN " + column.name + " " + column.definition); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func tableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// Schedule used to be served directly from seed.json. Populate the new table
+// independently of meta.seeded so existing installations receive it too.
+func seedScheduleIfEmpty(db *sql.DB, seed *Seed) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schedule_items`).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, item := range seed.Schedule {
+		if _, err := tx.Exec(
+			`INSERT INTO schedule_items (sort, time, title, place, icon) VALUES (?, ?, ?, ?, ?)`,
+			i, item.Time, item.Title, item.Where, item.Icon,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func seedOnce(db *sql.DB, seed *Seed) error {
@@ -182,7 +307,7 @@ func seedOnce(db *sql.DB, seed *Seed) error {
 		}
 		quizID, _ := res.LastInsertId()
 		for i, q := range quiz.Questions {
-			options, _ := json.Marshal(q.Options)
+			options, _ := json.Marshal(seedTexts(q.Options))
 			qtype := q.Type
 			if qtype == "" {
 				qtype = "choice"
@@ -192,8 +317,8 @@ func seedOnce(db *sql.DB, seed *Seed) error {
 				points = 5
 			}
 			if _, err := tx.Exec(
-				`INSERT INTO questions (quiz_id, sort, text, qtype, options, answer, points) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				quizID, i, q.Text, qtype, string(options), q.Answer, points,
+				`INSERT INTO questions (quiz_id, sort, text, qtype, options, answer, points, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				quizID, i, q.Text, qtype, string(options), string(q.Answer), points, q.MediaURL, q.MediaType,
 			); err != nil {
 				return err
 			}
@@ -201,7 +326,7 @@ func seedOnce(db *sql.DB, seed *Seed) error {
 	}
 
 	for i, p := range seed.Predictions {
-		options, _ := json.Marshal(p.Options)
+		options, _ := json.Marshal(seedTexts(p.Options))
 		points := p.Points
 		if points == 0 {
 			points = 10

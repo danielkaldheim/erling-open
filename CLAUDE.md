@@ -51,11 +51,27 @@ to `main`; apply `k8s/erling-open.yaml` (namespace `crudus-apps`, host
   `quizzesState`/`predictionsState` in `api.go`.
 - `seed.json` is applied **once** (guarded by `meta.seeded`). Editing it
   later does nothing for existing databases — change content via the admin
-  UI, or wipe the DB/PVC to re-seed. Schedule and score presets are the
-  exception: they're served straight from the embedded file on every boot.
+  UI, or wipe the DB/PVC to re-seed. The editable schedule is also copied
+  into SQLite (including during migration from the original schema). Only
+  score presets are served straight from the embedded file on every boot.
+- Quiz media uploads live under `DATA_DIR/uploads` and are served from
+  `/uploads/`. The public `/?display=quiz` view gets the same filtered state
+  as an anonymous client, so answer keys stay hidden until reveal.
+- Schedule slots carry a `revealed` flag (default 0, so migrated rows are
+  hidden too). `handleState` blanks `title`/`where`/`icon` for everyone but
+  the admin until it is set — the time is all a guest sees.
 - Question/prediction lifecycles are one-way for players but reversible
-  for the admin: un-revealing a question or re-grading after reveal
-  withdraws/recomputes points via the `ref` mechanism.
+  for the admin: un-revealing a question, re-grading after reveal, or
+  editing a revealed question's answer key/points withdraws/recomputes
+  points via the `ref` mechanism. Deleting a question (`POST
+  /api/admin/question/delete`) also drops its answers and its score events,
+  and deleting a quiz (`POST /api/admin/quiz/delete`) does the same for every
+  question in it.
+- The quiz editor (Mer → 🧠 Rediger quiz) keeps its fields in
+  `questionDrafts`, keyed by question id: every mutation anywhere pokes the
+  hub, and the refetch that follows would otherwise wipe half-typed edits.
+- `seed.json` answers and options may be written as bare numbers; `seedText`
+  in `db.go` accepts both so an unquoted year does not stop the boot.
 - Numeric answers accept `HH:MM` (parsed as minutes) and comma decimals
   (`parseNumeric` in `api.go`).
 - The k8s Deployment uses `strategy: Recreate` on purpose (SQLite on a

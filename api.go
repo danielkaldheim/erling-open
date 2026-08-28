@@ -5,8 +5,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +23,7 @@ type Server struct {
 	seed      *Seed
 	partyCode string
 	adminCode string
+	uploadDir string
 }
 
 type player struct {
@@ -204,6 +210,71 @@ func (s *Server) handleChecklistToggle(w http.ResponseWriter, r *http.Request, p
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// --- Schedule ---
+
+func (s *Server) handleScheduleUpdate(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		ID    int64  `json:"id"`
+		Time  string `json:"time"`
+		Title string `json:"title"`
+		Where string `json:"where"`
+		Icon  string `json:"icon"`
+	}
+	if err := decode(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "ugyldig forespørsel")
+		return
+	}
+	body.Time = strings.TrimSpace(body.Time)
+	body.Title = strings.TrimSpace(body.Title)
+	body.Where = strings.TrimSpace(body.Where)
+	body.Icon = strings.TrimSpace(body.Icon)
+	if _, err := time.Parse("15:04", body.Time); err != nil || body.Title == "" {
+		httpError(w, http.StatusBadRequest, "tid må være TT:MM og aktivitet må fylles ut")
+		return
+	}
+	if body.Icon == "" {
+		body.Icon = "📍"
+	}
+	result, err := s.db.Exec(
+		`UPDATE schedule_items SET time = ?, title = ?, place = ?, icon = ? WHERE id = ?`,
+		body.Time, body.Title, body.Where, body.Icon, body.ID,
+	)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		httpError(w, http.StatusNotFound, "ukjent aktivitet")
+		return
+	}
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleScheduleReveal flips a slot between hidden (time only) and revealed.
+// Reversible: an organizer who reveals too early can hide it again.
+func (s *Server) handleScheduleReveal(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		ID       int64 `json:"id"`
+		Revealed bool  `json:"revealed"`
+	}
+	if err := decode(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "ugyldig forespørsel")
+		return
+	}
+	result, err := s.db.Exec(`UPDATE schedule_items SET revealed = ? WHERE id = ?`, body.Revealed, body.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		httpError(w, http.StatusNotFound, "ukjent aktivitet")
+		return
+	}
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // --- Manual scores (golf quick-entry and everything else) ---
 
 func (s *Server) handleScoreAdd(w http.ResponseWriter, r *http.Request, _ *player) {
@@ -246,12 +317,14 @@ func (s *Server) handleScoreDelete(w http.ResponseWriter, r *http.Request, _ *pl
 
 func (s *Server) handleQuestionAdd(w http.ResponseWriter, r *http.Request, _ *player) {
 	var body struct {
-		QuizID  int64    `json:"quizId"`
-		Text    string   `json:"text"`
-		Type    string   `json:"type"`
-		Options []string `json:"options"`
-		Answer  string   `json:"answer"`
-		Points  int      `json:"points"`
+		QuizID    int64    `json:"quizId"`
+		Text      string   `json:"text"`
+		Type      string   `json:"type"`
+		Options   []string `json:"options"`
+		Answer    string   `json:"answer"`
+		Points    int      `json:"points"`
+		MediaURL  string   `json:"mediaUrl"`
+		MediaType string   `json:"mediaType"`
 	}
 	if err := decode(r, &body); err != nil || strings.TrimSpace(body.Text) == "" {
 		httpError(w, http.StatusBadRequest, "spørsmål mangler")
@@ -260,38 +333,118 @@ func (s *Server) handleQuestionAdd(w http.ResponseWriter, r *http.Request, _ *pl
 	if body.Type == "" {
 		body.Type = "choice"
 	}
+	if !validQuestionType(body.Type) {
+		httpError(w, http.StatusBadRequest, "ugyldig spørsmålstype")
+		return
+	}
 	if body.Points == 0 {
 		body.Points = 5
 	}
+	mediaURL, mediaType, err := normalizeQuestionMedia(body.MediaURL, body.MediaType)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	options, _ := json.Marshal(body.Options)
-	s.db.Exec(
-		`INSERT INTO questions (quiz_id, sort, text, qtype, options, answer, points)
-		 VALUES (?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM questions WHERE quiz_id = ?), ?, ?, ?, ?, ?)`,
-		body.QuizID, body.QuizID, strings.TrimSpace(body.Text), body.Type, string(options), body.Answer, body.Points,
+	result, err := s.db.Exec(
+		`INSERT INTO questions (quiz_id, sort, text, qtype, options, answer, points, media_url, media_type)
+		 SELECT z.id, COALESCE(MAX(q.sort), -1) + 1, ?, ?, ?, ?, ?, ?, ?
+		 FROM quizzes z LEFT JOIN questions q ON q.quiz_id = z.id WHERE z.id = ? GROUP BY z.id`,
+		strings.TrimSpace(body.Text), body.Type, string(options), strings.TrimSpace(body.Answer), body.Points,
+		mediaURL, mediaType, body.QuizID,
 	)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		httpError(w, http.StatusNotFound, "ukjent quiz")
+		return
+	}
 	s.hub.Poke()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleQuestionUpdate(w http.ResponseWriter, r *http.Request, _ *player) {
 	var body struct {
-		ID     int64   `json:"id"`
-		Answer *string `json:"answer"`
-		State  *string `json:"state"` // hidden | open | revealed
+		ID        int64     `json:"id"`
+		Text      *string   `json:"text"`
+		Type      *string   `json:"type"`
+		Options   *[]string `json:"options"`
+		Answer    *string   `json:"answer"`
+		Points    *int      `json:"points"`
+		State     *string   `json:"state"` // hidden | open | revealed
+		MediaURL  *string   `json:"mediaUrl"`
+		MediaType *string   `json:"mediaType"`
 	}
 	if err := decode(r, &body); err != nil {
 		httpError(w, http.StatusBadRequest, "ugyldig forespørsel")
 		return
 	}
-	if body.Answer != nil {
-		s.db.Exec(`UPDATE questions SET answer = ? WHERE id = ?`, *body.Answer, body.ID)
+	if body.Text != nil {
+		text := strings.TrimSpace(*body.Text)
+		if text == "" {
+			httpError(w, http.StatusBadRequest, "spørsmål mangler")
+			return
+		}
+		s.db.Exec(`UPDATE questions SET text = ? WHERE id = ?`, text, body.ID)
 	}
+	if body.Type != nil {
+		if !validQuestionType(*body.Type) {
+			httpError(w, http.StatusBadRequest, "ugyldig spørsmålstype")
+			return
+		}
+		s.db.Exec(`UPDATE questions SET qtype = ? WHERE id = ?`, *body.Type, body.ID)
+	}
+	if body.Options != nil {
+		options, _ := json.Marshal(*body.Options)
+		s.db.Exec(`UPDATE questions SET options = ? WHERE id = ?`, string(options), body.ID)
+	}
+	if body.Answer != nil {
+		s.db.Exec(`UPDATE questions SET answer = ? WHERE id = ?`, strings.TrimSpace(*body.Answer), body.ID)
+	}
+	if body.Points != nil {
+		s.db.Exec(`UPDATE questions SET points = ? WHERE id = ?`, *body.Points, body.ID)
+	}
+	if body.MediaURL != nil || body.MediaType != nil {
+		mediaURL, mediaType := "", ""
+		if body.MediaURL != nil {
+			mediaURL = *body.MediaURL
+		}
+		if body.MediaType != nil {
+			mediaType = *body.MediaType
+		}
+		var err error
+		mediaURL, mediaType, err = normalizeQuestionMedia(mediaURL, mediaType)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.db.Exec(`UPDATE questions SET media_url = ?, media_type = ? WHERE id = ?`, mediaURL, mediaType, body.ID)
+	}
+	contentChanged := body.Text != nil || body.Type != nil || body.Options != nil ||
+		body.Answer != nil || body.Points != nil
 	if body.State != nil {
 		switch *body.State {
 		case "hidden", "open", "revealed":
 		default:
 			httpError(w, http.StatusBadRequest, "ugyldig tilstand")
 			return
+		}
+		var quizID int64
+		if err := s.db.QueryRow(`SELECT quiz_id FROM questions WHERE id = ?`, body.ID).Scan(&quizID); err != nil {
+			httpError(w, http.StatusNotFound, "ukjent spørsmål")
+			return
+		}
+		if *body.State == "open" {
+			// A presentation has one current question. Previously revealed
+			// questions stay visible in history, while another open one closes.
+			s.db.Exec(`UPDATE questions SET state = 'hidden' WHERE quiz_id = ? AND state = 'open' AND id <> ?`, quizID, body.ID)
+			s.db.Exec(`UPDATE quizzes SET current_question_id = ? WHERE id = ?`, body.ID, quizID)
+		} else if *body.State == "revealed" {
+			s.db.Exec(`UPDATE quizzes SET current_question_id = ? WHERE id = ?`, body.ID, quizID)
+		} else {
+			s.db.Exec(`UPDATE quizzes SET current_question_id = NULL WHERE id = ? AND current_question_id = ?`, quizID, body.ID)
 		}
 		s.db.Exec(`UPDATE questions SET state = ? WHERE id = ?`, *body.State, body.ID)
 		if *body.State == "revealed" {
@@ -300,9 +453,334 @@ func (s *Server) handleQuestionUpdate(w http.ResponseWriter, r *http.Request, _ 
 			// Un-revealing (correcting a mistake) withdraws the points.
 			s.db.Exec(`DELETE FROM score_events WHERE ref = ?`, questionRef(body.ID))
 		}
+	} else if contentChanged {
+		// Fixing the answer key or the points after the reveal recomputes
+		// the scoring, the same way regrading a text answer does.
+		var qstate string
+		if err := s.db.QueryRow(`SELECT state FROM questions WHERE id = ?`, body.ID).Scan(&qstate); err == nil && qstate == "revealed" {
+			s.scoreQuestion(body.ID)
+		}
 	}
 	s.hub.Poke()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// --- Quizzes ---
+
+func (s *Server) handleQuizAdd(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := decode(r, &body); err != nil || strings.TrimSpace(body.Name) == "" {
+		httpError(w, http.StatusBadRequest, "quizen må ha et navn")
+		return
+	}
+	result, err := s.db.Exec(
+		`INSERT INTO quizzes (name, sort) SELECT ?, COALESCE(MAX(sort), -1) + 1 FROM quizzes`,
+		strings.TrimSpace(body.Name),
+	)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	id, _ := result.LastInsertId()
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+func (s *Server) handleQuizUpdate(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := decode(r, &body); err != nil || strings.TrimSpace(body.Name) == "" {
+		httpError(w, http.StatusBadRequest, "quizen må ha et navn")
+		return
+	}
+	result, err := s.db.Exec(`UPDATE quizzes SET name = ? WHERE id = ?`, strings.TrimSpace(body.Name), body.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		httpError(w, http.StatusNotFound, "ukjent quiz")
+		return
+	}
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleQuizDelete drops a whole quiz: its questions, the answers to them and
+// the points those answers produced.
+func (s *Server) handleQuizDelete(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		ID int64 `json:"id"`
+	}
+	if err := decode(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "ugyldig forespørsel")
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback()
+	tx.Exec(
+		`DELETE FROM score_events WHERE ref IN (SELECT 'q:' || id FROM questions WHERE quiz_id = ?)`,
+		body.ID,
+	)
+	tx.Exec(`DELETE FROM answers WHERE question_id IN (SELECT id FROM questions WHERE quiz_id = ?)`, body.ID)
+	tx.Exec(`DELETE FROM questions WHERE quiz_id = ?`, body.ID)
+	result, err := tx.Exec(`DELETE FROM quizzes WHERE id = ?`, body.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		httpError(w, http.StatusNotFound, "ukjent quiz")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleQuestionDelete removes a question with everything hanging off it:
+// the answers players gave and the points those answers produced.
+func (s *Server) handleQuestionDelete(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		ID int64 `json:"id"`
+	}
+	if err := decode(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "ugyldig forespørsel")
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback()
+	tx.Exec(`UPDATE quizzes SET current_question_id = NULL WHERE current_question_id = ?`, body.ID)
+	tx.Exec(`DELETE FROM score_events WHERE ref = ?`, questionRef(body.ID))
+	tx.Exec(`DELETE FROM answers WHERE question_id = ?`, body.ID)
+	result, err := tx.Exec(`DELETE FROM questions WHERE id = ?`, body.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		httpError(w, http.StatusNotFound, "ukjent spørsmål")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func validQuestionType(qtype string) bool {
+	return qtype == "choice" || qtype == "number" || qtype == "text"
+}
+
+func normalizeQuestionMedia(mediaURL, mediaType string) (string, string, error) {
+	mediaURL = strings.TrimSpace(mediaURL)
+	mediaType = strings.TrimSpace(mediaType)
+	if mediaURL == "" {
+		return "", "", nil
+	}
+	if mediaType != "image" && mediaType != "video" {
+		return "", "", fmt.Errorf("medietype må være bilde eller video")
+	}
+	if strings.HasPrefix(mediaURL, "/uploads/") {
+		return mediaURL, mediaType, nil
+	}
+	parsed, err := url.ParseRequestURI(mediaURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", "", fmt.Errorf("medielenken må være en http(s)-adresse")
+	}
+	return mediaURL, mediaType, nil
+}
+
+func (s *Server) handleQuizControl(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		ID              int64  `json:"id"`
+		Action          string `json:"action"`
+		DurationSeconds int    `json:"durationSeconds"`
+	}
+	if err := decode(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "ugyldig forespørsel")
+		return
+	}
+
+	now := time.Now().Unix()
+	switch body.Action {
+	case "start":
+		if body.DurationSeconds < 1 || body.DurationSeconds > 24*60*60 {
+			httpError(w, http.StatusBadRequest, "varigheten må være mellom 1 sekund og 24 timer")
+			return
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer tx.Rollback()
+		tx.Exec(`UPDATE quizzes SET state = 'finished', ends_at = ? WHERE state = 'active' AND id <> ?`, now, body.ID)
+		tx.Exec(`UPDATE questions SET state = 'hidden' WHERE state = 'open' AND quiz_id <> ?`, body.ID)
+		result, err := tx.Exec(
+			`UPDATE quizzes SET state = 'active', duration_seconds = ?, started_at = ?, ends_at = ? WHERE id = ?`,
+			body.DurationSeconds, now, now+int64(body.DurationSeconds), body.ID,
+		)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if changed, _ := result.RowsAffected(); changed == 0 {
+			httpError(w, http.StatusNotFound, "ukjent quiz")
+			return
+		}
+
+		var questionID int64
+		err = tx.QueryRow(
+			`SELECT id FROM questions WHERE quiz_id = ? ORDER BY CASE state WHEN 'open' THEN 0 WHEN 'hidden' THEN 1 ELSE 2 END, sort LIMIT 1`,
+			body.ID,
+		).Scan(&questionID)
+		if err == sql.ErrNoRows {
+			httpError(w, http.StatusConflict, "quizen har ingen spørsmål")
+			return
+		}
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		tx.Exec(`UPDATE questions SET state = 'hidden' WHERE quiz_id = ? AND state = 'open' AND id <> ?`, body.ID, questionID)
+		tx.Exec(`UPDATE questions SET state = 'open' WHERE id = ?`, questionID)
+		tx.Exec(`UPDATE quizzes SET current_question_id = ? WHERE id = ?`, questionID, body.ID)
+		tx.Exec(`DELETE FROM score_events WHERE ref = ?`, questionRef(questionID))
+		if err := tx.Commit(); err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case "stop":
+		tx, err := s.db.Begin()
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer tx.Rollback()
+		result, err := tx.Exec(`UPDATE quizzes SET state = 'finished', ends_at = ? WHERE id = ?`, now, body.ID)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if changed, _ := result.RowsAffected(); changed == 0 {
+			httpError(w, http.StatusNotFound, "ukjent quiz")
+			return
+		}
+		tx.Exec(`UPDATE questions SET state = 'hidden' WHERE quiz_id = ? AND state = 'open'`, body.ID)
+		if err := tx.Commit(); err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	default:
+		httpError(w, http.StatusBadRequest, "ukjent quizhandling")
+		return
+	}
+
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+const maxMediaUpload = 100 << 20
+
+func (s *Server) handleMediaUpload(w http.ResponseWriter, r *http.Request, _ *player) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxMediaUpload)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		httpError(w, http.StatusBadRequest, "kunne ikke lese filen (maks 100 MB)")
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "velg et bilde eller en video")
+		return
+	}
+	defer file.Close()
+
+	prefix, err := io.ReadAll(io.LimitReader(file, 512))
+	if err != nil || len(prefix) == 0 {
+		httpError(w, http.StatusBadRequest, "filen er tom eller ugyldig")
+		return
+	}
+	detected := http.DetectContentType(prefix)
+	mediaType, extension := uploadedMediaType(detected, header.Filename, header.Header.Get("Content-Type"))
+	if mediaType == "" {
+		httpError(w, http.StatusBadRequest, "filtypen støttes ikke – bruk bilde, MP4, WebM, Ogg eller MOV")
+		return
+	}
+
+	tmp, err := os.CreateTemp(s.uploadDir, ".upload-*")
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tmpName := tmp.Name()
+	keep := false
+	defer func() {
+		tmp.Close()
+		if !keep {
+			os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(prefix); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := io.Copy(tmp, file); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	name := newToken() + extension
+	finalPath := filepath.Join(s.uploadDir, name)
+	if err := os.Rename(tmpName, finalPath); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	keep = true
+	writeJSON(w, http.StatusOK, map[string]string{"url": "/uploads/" + name, "type": mediaType})
+}
+
+func uploadedMediaType(detected, filename, declared string) (string, string) {
+	allowed := map[string][2]string{
+		"image/jpeg": {"image", ".jpg"},
+		"image/png":  {"image", ".png"},
+		"image/gif":  {"image", ".gif"},
+		"image/webp": {"image", ".webp"},
+		"video/mp4":  {"video", ".mp4"},
+		"video/webm": {"video", ".webm"},
+		"video/ogg":  {"video", ".ogv"},
+	}
+	if result, ok := allowed[detected]; ok {
+		return result[0], result[1]
+	}
+	if strings.EqualFold(filepath.Ext(filename), ".mov") && strings.HasPrefix(strings.ToLower(declared), "video/") {
+		return "video", ".mov"
+	}
+	return "", ""
 }
 
 func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request, p *player) {
@@ -314,13 +792,21 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request, p *player)
 		httpError(w, http.StatusBadRequest, "svar mangler")
 		return
 	}
-	var state string
-	if err := s.db.QueryRow(`SELECT state FROM questions WHERE id = ?`, body.QuestionID).Scan(&state); err != nil {
+	var questionState, quizState string
+	var endsAt int64
+	if err := s.db.QueryRow(
+		`SELECT q.state, z.state, z.ends_at FROM questions q JOIN quizzes z ON z.id = q.quiz_id WHERE q.id = ?`,
+		body.QuestionID,
+	).Scan(&questionState, &quizState, &endsAt); err != nil {
 		httpError(w, http.StatusNotFound, "ukjent spørsmål")
 		return
 	}
-	if state != "open" {
+	if questionState != "open" {
 		httpError(w, http.StatusConflict, "spørsmålet er ikke åpent")
+		return
+	}
+	if quizState == "finished" || (quizState == "active" && endsAt > 0 && time.Now().Unix() >= endsAt) {
+		httpError(w, http.StatusConflict, "tiden for quizen er ute")
 		return
 	}
 	s.db.Exec(
@@ -561,6 +1047,77 @@ func (s *Server) handlePredictionResolve(w http.ResponseWriter, r *http.Request,
 
 // --- Photo missions ---
 
+func (s *Server) handleMissionAdd(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		Text   string `json:"text"`
+		Points int    `json:"points"`
+	}
+	if err := decode(r, &body); err != nil || strings.TrimSpace(body.Text) == "" {
+		httpError(w, http.StatusBadRequest, "oppdragstekst mangler")
+		return
+	}
+	if body.Points == 0 {
+		body.Points = 10
+	}
+	if body.Points < 0 {
+		httpError(w, http.StatusBadRequest, "poeng kan ikke være negativt")
+		return
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO missions (sort, text, points) VALUES ((SELECT COALESCE(MAX(sort), -1) + 1 FROM missions), ?, ?)`,
+		strings.TrimSpace(body.Text), body.Points,
+	)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleMissionUpdate(w http.ResponseWriter, r *http.Request, _ *player) {
+	var body struct {
+		ID     int64  `json:"id"`
+		Text   string `json:"text"`
+		Points int    `json:"points"`
+	}
+	if err := decode(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "ugyldig forespørsel")
+		return
+	}
+	body.Text = strings.TrimSpace(body.Text)
+	if body.Text == "" || body.Points < 0 {
+		httpError(w, http.StatusBadRequest, "oppdrag må ha tekst og gyldige poeng")
+		return
+	}
+	result, err := s.db.Exec(`UPDATE missions SET text = ?, points = ? WHERE id = ?`, body.Text, body.Points, body.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		httpError(w, http.StatusNotFound, "ukjent oppdrag")
+		return
+	}
+
+	// Keep labels and points for already approved submissions in sync.
+	var doneIDs []int64
+	rows, err := s.db.Query(`SELECT id FROM mission_done WHERE mission_id = ? AND state = 'approved'`, body.ID)
+	if err == nil {
+		for rows.Next() {
+			var id int64
+			rows.Scan(&id)
+			doneIDs = append(doneIDs, id)
+		}
+		rows.Close()
+	}
+	for _, id := range doneIDs {
+		s.scoreMissionDone(id)
+	}
+	s.hub.Poke()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *Server) handleMissionComplete(w http.ResponseWriter, r *http.Request, p *player) {
 	var body struct {
 		MissionID int64 `json:"missionId"`
@@ -597,24 +1154,28 @@ func (s *Server) handleMissionReview(w http.ResponseWriter, r *http.Request, _ *
 	}
 	s.db.Exec(`UPDATE mission_done SET state = ? WHERE id = ?`, state, body.ID)
 
-	ref := "m:" + strconv.FormatInt(body.ID, 10)
-	s.db.Exec(`DELETE FROM score_events WHERE ref = ?`, ref)
-	if body.Approved {
-		var teamID int64
-		var text string
-		var points int
-		if err := s.db.QueryRow(
-			`SELECT d.team_id, m.text, m.points FROM mission_done d JOIN missions m ON m.id = d.mission_id WHERE d.id = ?`,
-			body.ID,
-		).Scan(&teamID, &text, &points); err == nil {
-			s.db.Exec(
-				`INSERT INTO score_events (team_id, activity, label, points, ref) VALUES (?, 'foto', ?, ?, ?)`,
-				teamID, "Fotooppdrag: "+text, points, ref,
-			)
-		}
-	}
+	s.scoreMissionDone(body.ID)
 	s.hub.Poke()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) scoreMissionDone(doneID int64) {
+	ref := "m:" + strconv.FormatInt(doneID, 10)
+	s.db.Exec(`DELETE FROM score_events WHERE ref = ?`, ref)
+	var teamID int64
+	var text string
+	var points int
+	if err := s.db.QueryRow(
+		`SELECT d.team_id, m.text, m.points
+		 FROM mission_done d JOIN missions m ON m.id = d.mission_id
+		 WHERE d.id = ? AND d.state = 'approved'`,
+		doneID,
+	).Scan(&teamID, &text, &points); err == nil {
+		s.db.Exec(
+			`INSERT INTO score_events (team_id, activity, label, points, ref) VALUES (?, 'foto', ?, ?, ?)`,
+			teamID, "Fotooppdrag: "+text, points, ref,
+		)
+	}
 }
 
 // --- State ---
@@ -629,15 +1190,40 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 
 	state := map[string]any{
 		"now":          time.Now().Format("15:04"),
-		"schedule":     s.seed.Schedule,
+		"serverNow":    time.Now().Unix(),
 		"scorePresets": s.seed.ScorePresets,
 		"me":           p,
 	}
 
+	// Schedule is persistent so organizers can adjust the day in real time.
+	// Until the organizer reveals a slot everyone else only gets the time —
+	// the surprise is the point.
+	schedule := []map[string]any{}
+	rows, _ := s.db.Query(`SELECT id, time, title, place, icon, revealed FROM schedule_items ORDER BY sort, time, id`)
+	for rows.Next() {
+		var id int64
+		var itemTime, title, place, icon string
+		var revealed bool
+		rows.Scan(&id, &itemTime, &title, &place, &icon, &revealed)
+		item := map[string]any{"id": id, "time": itemTime, "revealed": revealed}
+		if revealed || isAdmin {
+			item["title"] = title
+			item["where"] = place
+			item["icon"] = icon
+		} else {
+			item["title"] = ""
+			item["where"] = ""
+			item["icon"] = ""
+		}
+		schedule = append(schedule, item)
+	}
+	rows.Close()
+	state["schedule"] = schedule
+
 	// Players and totals.
 	players := []map[string]any{}
 	playerTotals := map[int64]int{}
-	rows, _ := s.db.Query(
+	rows, _ = s.db.Query(
 		`SELECT p.id, p.name, p.emoji, p.team_id, p.is_admin, COALESCE(SUM(e.points), 0)
 		 FROM players p LEFT JOIN score_events e ON e.player_id = p.id
 		 GROUP BY p.id ORDER BY p.created_at`,
@@ -771,27 +1357,40 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) quizzesState(p *player, isAdmin bool) []map[string]any {
 	quizzes := []map[string]any{}
-	rows, _ := s.db.Query(`SELECT id, name FROM quizzes ORDER BY sort`)
+	rows, _ := s.db.Query(`SELECT id, name, state, duration_seconds, started_at, ends_at, current_question_id FROM quizzes ORDER BY sort`)
 	for rows.Next() {
 		var id int64
-		var name string
-		rows.Scan(&id, &name)
-		quizzes = append(quizzes, map[string]any{"id": id, "name": name, "questions": []map[string]any{}})
+		var name, quizState string
+		var duration, startedAt, endsAt int64
+		var currentQuestionID sql.NullInt64
+		rows.Scan(&id, &name, &quizState, &duration, &startedAt, &endsAt, &currentQuestionID)
+		if quizState == "active" && endsAt > 0 && time.Now().Unix() >= endsAt {
+			quizState = "expired"
+		}
+		entry := map[string]any{
+			"id": id, "name": name, "status": quizState, "durationSeconds": duration,
+			"startedAt": startedAt, "endsAt": endsAt, "currentQuestionId": nil,
+			"questions": []map[string]any{},
+		}
+		if currentQuestionID.Valid {
+			entry["currentQuestionId"] = currentQuestionID.Int64
+		}
+		quizzes = append(quizzes, entry)
 	}
 	rows.Close()
 
 	// Buffer the questions before any per-question lookups: the pool has a
 	// single connection, so a nested query while rows are open deadlocks.
 	type questionRow struct {
-		id, quizID                         int64
-		text, qtype, optionsJSON, answer, qstate string
-		points                             int
+		id, quizID                                                    int64
+		text, qtype, optionsJSON, answer, qstate, mediaURL, mediaType string
+		points                                                        int
 	}
 	var questionRows []questionRow
-	qrows, _ := s.db.Query(`SELECT id, quiz_id, text, qtype, options, answer, points, state FROM questions ORDER BY quiz_id, sort`)
+	qrows, _ := s.db.Query(`SELECT id, quiz_id, text, qtype, options, answer, points, state, media_url, media_type FROM questions ORDER BY quiz_id, sort`)
 	for qrows.Next() {
 		var q questionRow
-		qrows.Scan(&q.id, &q.quizID, &q.text, &q.qtype, &q.optionsJSON, &q.answer, &q.points, &q.qstate)
+		qrows.Scan(&q.id, &q.quizID, &q.text, &q.qtype, &q.optionsJSON, &q.answer, &q.points, &q.qstate, &q.mediaURL, &q.mediaType)
 		questionRows = append(questionRows, q)
 	}
 	qrows.Close()
@@ -804,8 +1403,11 @@ func (s *Server) quizzesState(p *player, isAdmin bool) []map[string]any {
 
 		q := map[string]any{
 			"id": id, "text": text, "type": qtype, "options": options,
-			"points": points, "state": qstate,
+			"points": points, "state": qstate, "mediaUrl": row.mediaURL, "mediaType": row.mediaType,
 		}
+		var answerCount int
+		s.db.QueryRow(`SELECT COUNT(*) FROM answers WHERE question_id = ?`, id).Scan(&answerCount)
+		q["answerCount"] = answerCount
 		if isAdmin || qstate == "revealed" {
 			q["answer"] = answer
 		}
@@ -852,9 +1454,9 @@ func (s *Server) predictionsState(p *player, isAdmin bool) []map[string]any {
 	predictions := []map[string]any{}
 	// Buffered before per-row lookups; see quizzesState.
 	type predictionRow struct {
-		id                                  int64
+		id                                      int64
 		text, ptype, optionsJSON, pstate, fasit string
-		points                              int
+		points                                  int
 	}
 	var predictionRows []predictionRow
 	rows, _ := s.db.Query(`SELECT id, text, ptype, options, points, state, fasit FROM predictions ORDER BY sort`)

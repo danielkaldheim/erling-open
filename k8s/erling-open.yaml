@@ -1,12 +1,12 @@
 # kubectl apply -f k8s/erling-open.yaml
 # Create the secret first (never commit it):
-#   kubectl -n crudus-apps create secret generic erling-open-secrets \
+#   kubectl -n websites create secret generic erling-open-secrets \
 #     --from-literal=PARTY_CODE=<festkode> --from-literal=ADMIN_CODE=<arrangørkode>
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: erling-open-data
-  namespace: crudus-apps
+  name: erling-open-data2
+  namespace: websites
 spec:
   accessModes:
     - ReadWriteOnce
@@ -18,7 +18,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: erling-open
-  namespace: crudus-apps
+  namespace: websites
   labels:
     app: erling-open
 spec:
@@ -57,16 +57,18 @@ spec:
               path: /api/state
               port: http
             initialDelaySeconds: 2
+      imagePullSecrets:
+        - name: ghcr-regcred
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: erling-open-data
+            claimName: erling-open-data2
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: erling-open-service
-  namespace: crudus-apps
+  namespace: websites
   labels:
     app: erling-open
 spec:
@@ -81,7 +83,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: erling-open-ingress
-  namespace: crudus-apps
+  namespace: websites
   labels:
     app: erling-open
   annotations:

@@ -33,6 +33,10 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		log.Fatal(err)
 	}
+	uploadDir := filepath.Join(dataDir, "uploads")
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		log.Fatal(err)
+	}
 	db, err := openDB(filepath.Join(dataDir, "erling.db"), &seed)
 	if err != nil {
 		log.Fatal(err)
@@ -44,6 +48,7 @@ func main() {
 		seed:      &seed,
 		partyCode: env("PARTY_CODE", ""),
 		adminCode: env("ADMIN_CODE", ""),
+		uploadDir: uploadDir,
 	}
 	if s.adminCode == "" {
 		log.Println("WARNING: ADMIN_CODE is empty — admin mode cannot be unlocked")
@@ -66,13 +71,24 @@ func main() {
 	mux.HandleFunc("POST /api/admin/score/delete", s.withAdmin(s.handleScoreDelete))
 	mux.HandleFunc("POST /api/admin/team", s.withAdmin(s.handleCreateTeam))
 	mux.HandleFunc("POST /api/admin/assign-team", s.withAdmin(s.handleAssignTeam))
+	mux.HandleFunc("POST /api/admin/quiz", s.withAdmin(s.handleQuizAdd))
+	mux.HandleFunc("POST /api/admin/quiz/update", s.withAdmin(s.handleQuizUpdate))
+	mux.HandleFunc("POST /api/admin/quiz/delete", s.withAdmin(s.handleQuizDelete))
 	mux.HandleFunc("POST /api/admin/question", s.withAdmin(s.handleQuestionAdd))
 	mux.HandleFunc("POST /api/admin/question/update", s.withAdmin(s.handleQuestionUpdate))
+	mux.HandleFunc("POST /api/admin/question/delete", s.withAdmin(s.handleQuestionDelete))
+	mux.HandleFunc("POST /api/admin/quiz/control", s.withAdmin(s.handleQuizControl))
+	mux.HandleFunc("POST /api/admin/media", s.withAdmin(s.handleMediaUpload))
 	mux.HandleFunc("POST /api/admin/answer/grade", s.withAdmin(s.handleGradeAnswer))
 	mux.HandleFunc("POST /api/admin/predictions/lock", s.withAdmin(s.handlePredictionsLock))
 	mux.HandleFunc("POST /api/admin/prediction/resolve", s.withAdmin(s.handlePredictionResolve))
+	mux.HandleFunc("POST /api/admin/schedule/update", s.withAdmin(s.handleScheduleUpdate))
+	mux.HandleFunc("POST /api/admin/schedule/reveal", s.withAdmin(s.handleScheduleReveal))
+	mux.HandleFunc("POST /api/admin/mission", s.withAdmin(s.handleMissionAdd))
+	mux.HandleFunc("POST /api/admin/mission/update", s.withAdmin(s.handleMissionUpdate))
 	mux.HandleFunc("POST /api/admin/mission/review", s.withAdmin(s.handleMissionReview))
 
+	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadDir))))
 	static, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /", http.FileServerFS(static))
 
