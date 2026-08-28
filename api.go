@@ -101,6 +101,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Name      string `json:"name"`
 		Emoji     string `json:"emoji"`
 		PartyCode string `json:"partyCode"`
+		AdminCode string `json:"adminCode"`
 	}
 	if err := decode(r, &body); err != nil || strings.TrimSpace(body.Name) == "" {
 		httpError(w, http.StatusBadRequest, "navn mangler")
@@ -114,10 +115,35 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if emoji == "" {
 		emoji = "🍺"
 	}
+	name := strings.TrimSpace(body.Name)
+
+	// Same name and same emoji means the same person coming back — a new
+	// phone, a cleared browser, a tab closed at the wrong moment. Hand back
+	// the existing token so their points and admin rights follow them.
+	var existingID int64
+	var existingToken string
+	var existingIsAdmin bool
+	if err := s.db.QueryRow(
+		`SELECT id, token, is_admin FROM players WHERE name = ? AND emoji = ?`, name, emoji,
+	).Scan(&existingID, &existingToken, &existingIsAdmin); err == nil {
+		// Taking over an organizer costs more than knowing their name: the
+		// party code is shared with everyone, the admin code is not.
+		if existingIsAdmin {
+			if s.adminCode == "" || !strings.EqualFold(strings.TrimSpace(body.AdminCode), s.adminCode) {
+				httpError(w, http.StatusForbidden, "arrangørkode kreves for denne spilleren")
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"token": existingToken, "playerId": existingID, "returning": true,
+		})
+		return
+	}
+
 	token := newToken()
 	res, err := s.db.Exec(
 		`INSERT INTO players (name, emoji, token) VALUES (?, ?, ?)`,
-		strings.TrimSpace(body.Name), emoji, token,
+		name, emoji, token,
 	)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())

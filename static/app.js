@@ -12,7 +12,7 @@ const app = createApp({
       displayMode: new URLSearchParams(window.location.search).get('display') === 'quiz',
       clockNow: Date.now(),
       // registration
-      regName: '', regEmoji: '🍺', regCode: '',
+      regName: '', regEmoji: '🍺', regCode: '', regAdminCode: '', needsAdminCode: false,
       // inputs keyed by question/prediction id
       inputs: {},
       // admin
@@ -136,12 +136,26 @@ const app = createApp({
     },
 
     async register() {
-      const data = await this.api('/api/register', {
-        name: this.regName, emoji: this.regEmoji, partyCode: this.regCode,
-      });
+      let data;
+      try {
+        data = await this.api('/api/register', {
+          name: this.regName, emoji: this.regEmoji, partyCode: this.regCode,
+          adminCode: this.regAdminCode,
+        });
+      } catch (err) {
+        // The name belongs to an organizer: ask for the organizer code too.
+        if (err.message.includes('arrangørkode')) this.needsAdminCode = true;
+        return;
+      }
+      this.needsAdminCode = false;
+      this.regAdminCode = '';
       this.token = data.token;
       localStorage.setItem('erlingToken', this.token);
       await this.fetchState();
+      if (data.returning) {
+        this.error = `Velkommen tilbake, ${this.me ? this.me.name : this.regName}! 🎉`;
+        setTimeout(() => { this.error = ''; }, 3500);
+      }
     },
 
     async unlockAdmin() {
@@ -584,6 +598,12 @@ const app = createApp({
       </div>
       <label>Festkode</label>
       <input v-model="regCode" placeholder="Får du av arrangøren" autocomplete="off">
+      <p class="muted small">Har du vært med før? Bruk samme navn og samme lagmerke,
+        så finner vi deg igjen med poengene dine.</p>
+      <template v-if="needsAdminCode">
+        <label>Arrangørkode</label>
+        <input v-model="regAdminCode" placeholder="Navnet tilhører en arrangør" autocomplete="off">
+      </template>
       <br><br>
       <button class="primary block" :disabled="!regName" @click="register">Bli med 🎉</button>
     </div>

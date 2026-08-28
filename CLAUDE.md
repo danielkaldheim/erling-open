@@ -40,7 +40,11 @@ to `main`; apply `k8s/erling-open.yaml` (namespace `crudus-apps`, host
   (`vue.esm-browser.prod.js` — includes the template compiler; don't swap
   it for the runtime-only build). No npm, no bundler.
 - **Auth**: register with name + emoji + `PARTY_CODE` → token in
-  localStorage. `ADMIN_CODE` flips `is_admin` on a player. That's all —
+  localStorage. Registering again with the *same* name and emoji returns the
+  existing player's token instead of creating a duplicate, so a new phone or
+  a cleared browser keeps its points. If the matched player is an organizer,
+  the request must carry `adminCode` too — otherwise anyone who knows a name
+  could pick up admin rights with the shared party code. `ADMIN_CODE` flips `is_admin` on a player. That's all —
   the threat model is ten friends at a party.
 
 ## Gotchas (learned the hard way)

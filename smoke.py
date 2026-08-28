@@ -57,10 +57,40 @@ def main():
     _, code = call("/api/register", {"name": "Snik", "partyCode": "feil"})
     check("feil festkode avvist", code == 403)
 
+    # Same name and emoji is the same person on a new phone, not a new player.
+    again, code = call("/api/register", {"name": "Daniel", "emoji": "🎩", "partyCode": "fest"})
+    twin, _ = call("/api/register", {"name": "Daniel", "emoji": "🚀", "partyCode": "fest"})
+    roster, _ = call("/api/state", token=token1)
+    check(
+        "samme navn og merke gjenbruker spilleren",
+        code == 200
+        and again["playerId"] == player1["playerId"]
+        and again["token"] == token1
+        and again.get("returning") is True
+        and len([p for p in roster["players"] if p["name"] == "Daniel"]) == 2
+        and twin["playerId"] != player1["playerId"],
+    )
+
     _, code = call("/api/admin/unlock", {"code": "hemmelig"}, token1)
     check("admin unlock", code == 200)
     _, code = call("/api/admin/score", {"playerId": player1["playerId"], "label": "x", "points": 1}, token2)
     check("ikke-admin nektes admin-endepunkt", code == 403)
+
+    # An organizer's name+emoji is not enough to take over their player.
+    _, no_code = call("/api/register", {"name": "Daniel", "emoji": "🎩", "partyCode": "fest"})
+    _, wrong_code = call(
+        "/api/register",
+        {"name": "Daniel", "emoji": "🎩", "partyCode": "fest", "adminCode": "gjett"},
+    )
+    back, right_code = call(
+        "/api/register",
+        {"name": "Daniel", "emoji": "🎩", "partyCode": "fest", "adminCode": "hemmelig"},
+    )
+    check(
+        "arrangørnavn krever arrangørkode",
+        no_code == 403 and wrong_code == 403
+        and right_code == 200 and back["token"] == token1,
+    )
 
     state, code = call("/api/state", token=token1)
     check("state svarer (deadlock-regresjonen)", code == 200)

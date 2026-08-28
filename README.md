@@ -91,5 +91,5 @@ kubectl apply -f k8s/erling-open.yaml
 |---|---|
 | `PORT` | Listen port (default 8080) |
 | `DATA_DIR` | SQLite directory (default `./data`) |
-| `PARTY_CODE` | Shared code required to register (empty = open) |
+| `PARTY_CODE` | Shared code required to register (empty = open). Signing in again with the same name *and* emoji returns the existing player instead of a duplicate; if that player is an organizer, `ADMIN_CODE` is required as well |
 | `ADMIN_CODE` | Code that unlocks organizer mode |
